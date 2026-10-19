@@ -1,0 +1,19 @@
+# Fly.io config for a single always-on worker (no web traffic).
+# Change `app` to a unique name before `fly launch --copy-config --no-deploy`.
+app = "whalecopy-bot"
+primary_region = "iad"   # near Kalshi/Polymarket infrastructure on the US east coast
+
+[build]
+
+[env]
+  MODE = "paper"
+  KALSHI_ENV = "prod"
+  DATA_DIR = "/data"
+
+[mounts]
+  source = "whalecopy_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

@@ -1,0 +1,38 @@
+# Copy to config.yaml and edit. Every key can also be overridden with an env var of the
+# same name in UPPER_CASE (e.g. MAX_TRADE_USD=40), which is handy in a cloud dashboard.
+# Secrets (Kalshi key) and MODE belong in env vars, not in this file.
+
+# Polymarket wallets to follow (proxy wallet addresses). Get candidates with:
+#   whalecopy discover
+wallets:
+  # - "0x0000000000000000000000000000000000000000"
+
+# --- which whale trades count as signals ---
+min_whale_trade_usd: 500      # ignore smaller whale buys
+big_whale_trade_usd: 5000     # whale buys this big get our max size
+min_price: 0.05               # skip longshots
+max_price: 0.92               # skip near-certainties
+max_signal_age_sec: 600       # ignore whale trades older than 10 minutes
+mirror_sells: true            # exit our copy when that whale sells
+
+# --- sizing: dollars per copied trade ---
+min_trade_usd: 25
+max_trade_usd: 50
+max_slippage: 0.03            # pay at most the whale's price + 3 cents
+
+# --- risk limits ---
+daily_max_usd: 250            # new money per UTC day
+max_open_usd: 1000            # total money in open copies
+per_market_max_usd: 100
+max_trades_per_day: 15
+cooldown_minutes: 60          # one copy per wallet+market per hour
+paused: false                 # kill switch (or set env PAUSED=true)
+
+# --- market matching ---
+auto_approve_score: 92        # text matches at/above this trade without review
+review_min_score: 70
+date_tolerance_days: 3
+sports_auto_approve: false    # let slug-matched games trade in LIVE mode (paper always uses them)
+index_refresh_hours: 4
+
+poll_seconds: 30

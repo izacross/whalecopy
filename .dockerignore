@@ -1,0 +1,7 @@
+data/
+.env
+*.pem
+*.key
+tests/
+__pycache__/
+.pytest_cache/
