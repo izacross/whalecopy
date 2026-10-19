@@ -5,6 +5,7 @@ Docs: https://docs.kalshi.com
 from __future__ import annotations
 
 import base64
+import math
 import logging
 import time
 from dataclasses import dataclass
@@ -184,7 +185,8 @@ class KalshiClient:
         }
         if action == "sell":
             body["reduce_only"] = True
-        return self._request("POST", "/portfolio/orders", json=body, auth=True, retries=0)["order"]
+        data = self._request("POST", "/portfolio/orders", json=body, auth=True, retries=0)
+        return data.get("order") or data
 
 
 def filled_count(order: dict) -> int:
@@ -194,12 +196,27 @@ def filled_count(order: dict) -> int:
     initial = order.get("initial_count")
     remaining = order.get("remaining_count")
     if initial is not None and remaining is not None:
-        return int(initial) - int(remaining)
+        return int(float(initial)) - int(float(remaining))
     return 0
 
 
+def fees_usd(order: dict) -> float:
+    total = 0.0
+    for key in ("taker_fees", "maker_fees"):
+        if order.get(f"{key}_dollars") not in (None, ""):
+            total += float(order[f"{key}_dollars"])
+        elif order.get(key) not in (None, ""):
+            total += float(order[key]) / 100
+    return total
+
+
+def estimate_fee(count: int, price: float, rate: float) -> float:
+    """Paper-mode fee estimate, rounded up to the cent (Kalshi-style rate * C * P * (1-P))."""
+    return math.ceil(rate * count * price * (1 - price) * 100) / 100
+
+
 def fill_cost_usd(order: dict, count: int, limit_price: float) -> float:
-    """Best-effort average cost of what filled; falls back to the limit price."""
+    """Best-effort cost of a BUY's fills, excluding fees; falls back to the limit price."""
     for key in ("taker_fill_cost_dollars",):
         if order.get(key) not in (None, ""):
             maker = order.get("maker_fill_cost_dollars") or 0

@@ -15,7 +15,15 @@ from rapidfuzz import fuzz, process
 
 from .polymarket import parse_iso
 
-_NUM = re.compile(r"\$?\s?(\d[\d,]*(?:\.\d+)?)\s*(k|m|bn|b|%)?\b", re.I)
+_NUM = re.compile(
+    r"(\$)?(\d[\d,]*(?:\.\d+)?)\s*(k|m|bn|b|%|bps|bp|pts|pt|c)?(?![a-z0-9])", re.I)
+_POLARITY = [
+    ("UP", r"\b(above|over|more than|higher|greater|exceeds?|at least|or more|rises?|up)\b"),
+    ("DOWN", r"\b(below|under|less than|lower|fewer|at most|or less|falls?|drops?|down)\b"),
+    ("BEFORE", r"\bbefore\b"),
+    ("AFTER", r"\bafter\b"),
+    ("NEG", r"\b(not|no|never|without)\b|n't\b"),
+]
 _STOP = {"will", "the", "a", "an", "be", "of", "on", "in", "by", "to", "at", "for", "?"}
 
 
@@ -31,9 +39,9 @@ def numbers(text: str) -> tuple[set[str], set[str]]:
     """Returns (hard_numbers, years). Years may be omitted on one side; other numbers may not."""
     hard, years = set(), set()
     for m in _NUM.finditer(text or ""):
-        raw, suffix = m.group(1).replace(",", ""), (m.group(2) or "").lower()
+        dollar, raw, suffix = m.group(1), m.group(2), (m.group(3) or "").lower()
         try:
-            v = float(raw)
+            v = float(raw.replace(",", ""))
         except ValueError:
             continue
         if suffix == "k":
@@ -42,11 +50,18 @@ def numbers(text: str) -> tuple[set[str], set[str]]:
             v *= 1_000_000
         elif suffix in ("b", "bn"):
             v *= 1_000_000_000
-        if suffix == "" and v.is_integer() and 1990 <= v <= 2100:
+        if (not dollar and not suffix and "," not in raw and v.is_integer()
+                and 1990 <= v <= 2100):
             years.add(str(int(v)))
             continue
         hard.add(f"{v:g}")
     return hard, years
+
+
+def polarity(text: str) -> set[str]:
+    """Direction/negation words. Two questions that differ here mean different things."""
+    t = (text or "").lower()
+    return {name for name, pat in _POLARITY if re.search(pat, t)}
 
 
 def kalshi_text(row: dict) -> str:
@@ -119,10 +134,16 @@ class Matcher:
             notes, hard_ok = [], True
 
             k_hard, k_years = numbers(text)
-            if p_hard - k_hard:
+            if p_hard != k_hard:
+                diff = sorted(p_hard ^ k_hard)
+                if p_hard - k_hard:   # a number in the question that Kalshi lacks: real mismatch
+                    score -= 30
+                hard_ok = False
+                notes.append(f"numbers differ {diff}")
+            if polarity(poly_text) != polarity(text):
                 score -= 30
                 hard_ok = False
-                notes.append(f"numbers differ {sorted(p_hard - k_hard)}")
+                notes.append("direction/negation words differ")
             if p_years and k_years and not (p_years & k_years):
                 score -= 30
                 hard_ok = False
@@ -164,7 +185,11 @@ _SPORTS_SLUG = re.compile(r"^([a-z0-9]+)-([a-z]{2,4})-([a-z]{2,4})-(\d{4})-(\d{2
 _MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 
 
-def sports_match(rows: list[dict], slug: str, outcome_index: int) -> MatchResult | None:
+_GENERIC_OUTCOMES = {"yes", "no", "over", "under", "draw", "tie", ""}
+
+
+def sports_match(rows: list[dict], slug: str, outcome_index: int, title: str = "",
+                 outcome: str = "") -> MatchResult | None:
     """Moneyline games: Polymarket slug 'nba-lal-bos-2026-10-19' -> Kalshi 'KX...GAME-26OCT19LALBOS-LAL'.
 
     Assumes Polymarket's outcome order follows the team order in the slug (team 1 = outcome 0).
@@ -172,9 +197,13 @@ def sports_match(rows: list[dict], slug: str, outcome_index: int) -> MatchResult
     after checking them in paper mode with `whalecopy map list`.
     """
     m = _SPORTS_SLUG.match(slug or "")
-    if not m or outcome_index not in (0, 1):
+    if not m or outcome_index not in (0, 1) or outcome.strip().lower() in _GENERIC_OUTCOMES:
         return None
-    _, a, b, year, month, day = m.groups()
+    # The outcome must be the team named in that position of "A vs. B" in the title.
+    parts = re.split(r"\s+vs\.?\s+", title or "", flags=re.I)
+    if len(parts) != 2 or fuzz.partial_ratio(outcome.lower(), parts[outcome_index].lower()) < 80:
+        return None
+    league, a, b, year, month, day = m.groups()
     team = (a, b)[outcome_index].upper()
     base = datetime(int(year), int(month), int(day))
     keys = set()
@@ -182,9 +211,12 @@ def sports_match(rows: list[dict], slug: str, outcome_index: int) -> MatchResult
         d = datetime.fromordinal(base.toordinal() + delta)
         stamp = f"{d.year % 100:02d}{_MONTHS[d.month - 1]}{d.day:02d}"
         keys |= {f"{stamp}{a.upper()}{b.upper()}", f"{stamp}{b.upper()}{a.upper()}"}
-    hits = [r for r in rows if "GAME-" in (r.get("event_ticker") or "")
-            and (r.get("event_ticker") or "").split("-", 1)[-1] in keys
-            and r["ticker"].endswith(f"-{team}")]
+    hits = []
+    for r in rows:
+        series, _, ev = (r.get("event_ticker") or "").partition("-")
+        if (series.endswith("GAME") and league.upper() in series and ev in keys
+                and r["ticker"] == f"{r['event_ticker']}-{team}"):
+            hits.append(r)
     if len(hits) != 1:
         return None
     row = hits[0]

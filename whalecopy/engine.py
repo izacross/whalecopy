@@ -1,13 +1,14 @@
 """The copy loop: watch wallets -> map to Kalshi -> check price and risk -> trade (paper or live)."""
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import time
-import uuid
 
 from .config import Settings
-from .kalshi import KalshiClient, KalshiError, fill_cost_usd, filled_count
+from .kalshi import (KalshiClient, KalshiError, estimate_fee, fees_usd, fill_cost_usd,
+                     filled_count)
 from .matcher import Matcher, index_row_from_market, sports_match
 from .notify import Notifier
 from .polymarket import PolymarketClient, WhaleTrade, activity_key, aggregate_trades
@@ -16,6 +17,8 @@ from .store import Store, day_start
 log = logging.getLogger(__name__)
 
 SETTLED_STATUSES = {"settled", "determined", "finalized"}
+CURSOR_OVERLAP_SEC = 300   # re-read the last 5 minutes each poll; the seen-set dedupes
+MAX_PAGES = 10
 
 
 def size_for(usdc: float, s: Settings) -> float:
@@ -25,6 +28,12 @@ def size_for(usdc: float, s: Settings) -> float:
     span = max(s.big_whale_trade_usd - s.min_whale_trade_usd, 1e-9)
     frac = max(0.0, (usdc - s.min_whale_trade_usd) / span)
     return round(s.min_trade_usd + frac * (s.max_trade_usd - s.min_trade_usd), 2)
+
+
+def order_id_for(t: WhaleTrade, action: str, ticker: str) -> str:
+    """Deterministic id, so the same signal can never become two Kalshi orders."""
+    h = hashlib.sha256("|".join((action, ticker) + t.keys).encode()).hexdigest()[:24]
+    return f"wc-{h}"
 
 
 class CopyEngine:
@@ -41,6 +50,16 @@ class CopyEngine:
     @property
     def mode(self) -> str:
         return self.s.mode
+
+    @property
+    def halted(self) -> str | None:
+        return self.store.get(f"halted:{self.mode}")
+
+    def halt(self, reason: str) -> None:
+        self.store.set(f"halted:{self.mode}", reason)
+        self.store.log_event("halted", reason=reason, mode=self.mode)
+        self.notify.send(f"HALTED ({self.mode}): {reason}. Check your Kalshi account, then "
+                         "run `whalecopy resume`.")
 
     # -- Kalshi market index -------------------------------------------------------
     def refresh_index(self, force: bool = False) -> int:
@@ -74,12 +93,18 @@ class CopyEngine:
             self.store.set(key, int(self.clock()))
             log.info("now watching %s", wallet)
             return []
-        rows = self.poly.activity(wallet, start=cursor)
+        start = max(int(cursor) - CURSOR_OVERLAP_SEC, 1)
+        rows: list[dict] = []
+        for page in range(MAX_PAGES):
+            batch = self.poly.activity(wallet, start=start, offset=page * 500)
+            rows.extend(batch)
+            if len(batch) < 500:
+                break
         fresh = [r for r in rows if not self.store.is_seen(activity_key(r))]
         if not fresh:
             return []
         self.store.mark_seen(activity_key(r) for r in fresh)
-        self.store.set(key, max(int(r.get("timestamp") or cursor) for r in fresh))
+        self.store.set(key, max([int(cursor)] + [int(r.get("timestamp") or 0) for r in fresh]))
         return aggregate_trades(wallet, fresh)
 
     # -- mapping -------------------------------------------------------------------------
@@ -89,13 +114,12 @@ class CopyEngine:
         if m and not (m["status"] == "nomatch" and m["created_at"] < index_time):
             return self._usable(m["kalshi_ticker"], m["kalshi_side"], m["status"])
 
-        for slug in (t.slug, t.event_slug):
-            sm = sports_match(self.matcher.rows, slug, t.outcome_index)
-            if sm:
-                self.store.save_mapping(t.condition_id, t.outcome_index, sm.ticker, sm.side,
-                                        sm.score, "sports", f"{t.title} / {t.outcome}",
-                                        sm.candidates[0].text, [c.__dict__ for c in sm.candidates])
-                return self._usable(sm.ticker, sm.side, "sports")
+        sm = sports_match(self.matcher.rows, t.slug, t.outcome_index, t.title, t.outcome)
+        if sm:
+            self.store.save_mapping(t.condition_id, t.outcome_index, sm.ticker, sm.side,
+                                    sm.score, "sports", f"{t.title} / {t.outcome}",
+                                    sm.candidates[0].text, [c.__dict__ for c in sm.candidates])
+            return self._usable(sm.ticker, sm.side, "sports")
 
         info = self.poly.market_info(t.condition_id) or {}
         question = info.get("question") or t.title
@@ -116,7 +140,7 @@ class CopyEngine:
         return res.ticker, res.side, ""
 
     def _usable(self, ticker, side, status) -> tuple[str | None, str | None, str]:
-        if status in ("auto", "approved"):
+        if status in ("auto", "approved") and ticker and side:
             return ticker, side, ""
         if status == "sports":
             if not self.s.is_live or self.s.sports_auto_approve:
@@ -128,7 +152,10 @@ class CopyEngine:
 
     # -- main loop body ---------------------------------------------------------------------
     def tick(self) -> None:
-        self.refresh_index()
+        try:
+            self.refresh_index()
+        except Exception as e:
+            log.warning("Kalshi index refresh failed (will retry): %s", e)
         for wallet in self.s.wallets:
             try:
                 trades = self.poll_wallet(wallet)
@@ -138,12 +165,15 @@ class CopyEngine:
             for t in trades:
                 try:
                     self.handle(t)
-                except KalshiError as e:
-                    log.error("Kalshi error on %s: %s", t.title, e)
-                    self.store.log_event("error", t.wallet, t.condition_id, error=str(e),
+                except Exception as e:  # one bad trade shouldn't drop the rest
+                    log.exception("error handling %s", t.title)
+                    self.store.log_event("error", t.wallet, t.condition_id, error=repr(e),
                                          title=t.title, mode=self.mode)
         if self.clock() - self.store.get("settled_at", 0) > 3600:
-            self.settle()
+            try:
+                self.settle()
+            except Exception:
+                log.exception("settlement pass failed")
             self.store.set("settled_at", self.clock())
         if self.clock() - self.store.get("pruned_at", 0) > 86400:
             self.store.prune_seen()
@@ -157,17 +187,32 @@ class CopyEngine:
                              mode=self.mode, **extra)
 
     def handle(self, t: WhaleTrade) -> None:
-        if self.clock() - t.timestamp > self.s.max_signal_age_sec:
-            return self.skip(t, "signal too old")
         if t.side == "BUY":
+            if self.clock() - t.timestamp > self.s.max_signal_age_sec:
+                return self.skip(t, "signal too old")
             return self.handle_buy(t)
         if t.side == "SELL" and self.s.mirror_sells:
-            return self.handle_sell(t)
+            return self.handle_sell(t)  # exits are mirrored even if late
+
+    def _send_order(self, t: WhaleTrade, **kw) -> dict | None:
+        """Live order with a deterministic id. If the outcome is unknown, halt everything."""
+        try:
+            return self.kalshi.create_order(
+                client_order_id=order_id_for(t, kw["action"], kw["ticker"]),
+                time_in_force=self.s.time_in_force, **kw)
+        except KalshiError as e:
+            if " -> 4" in str(e):     # Kalshi rejected it (4xx): nothing was placed
+                self.skip(t, "Kalshi rejected order", ticker=kw["ticker"], error=str(e)[:200])
+                return None
+            self.halt(f"order outcome unknown for {kw['ticker']} ({e})")
+            return None
 
     def handle_buy(self, t: WhaleTrade) -> None:
         s = self.s
         if s.paused:
             return self.skip(t, "paused")
+        if self.halted:
+            return self.skip(t, "halted")
         if t.usdc < s.min_whale_trade_usd:
             return self.skip(t, "whale trade too small")
         if not (s.min_price <= t.price <= s.max_price):
@@ -183,9 +228,13 @@ class CopyEngine:
         today = day_start(self.clock())
         if self.store.copies_since(self.mode, today) >= s.max_trades_per_day:
             return self.skip(t, "daily trade count reached")
-        opposite = "no" if side == "yes" else "yes"
-        if any(p["side"] == opposite for p in self.store.open_positions(self.mode, ticker)):
-            return self.skip(t, "already holding the other side")
+        event = (self.store.kalshi_market(ticker) or {}).get("event_ticker")
+        for p in self.store.open_positions(self.mode):
+            p_event = (self.store.kalshi_market(p["kalshi_ticker"]) or {}).get("event_ticker")
+            same_event = p["kalshi_ticker"] == ticker or (event and p_event == event)
+            if same_event and (p["kalshi_ticker"], p["side"]) != (ticker, side):
+                return self.skip(t, "already holding a conflicting position in this event",
+                                 ticker=ticker, held=p["kalshi_ticker"])
 
         budget = min(
             size_for(t.usdc, s),
@@ -205,21 +254,24 @@ class CopyEngine:
         limit = round(min(t.price + s.max_slippage, 0.99), 2)
         if ask > limit:
             return self.skip(t, "Kalshi price already moved", ticker=ticker, ask=ask, limit=limit)
-        count = math.floor(budget / limit)
+        # leave room for fees inside the budget
+        count = math.floor(budget / (limit + s.paper_fee_rate * limit * (1 - limit) + 0.01))
         if count < 1:
             return self.skip(t, "budget below one contract", ticker=ticker)
 
         if s.is_live:
-            order = self.kalshi.create_order(
-                ticker=ticker, side=side, action="buy", count=count, limit_price=limit,
-                client_order_id=f"wc-{uuid.uuid4()}", time_in_force=s.time_in_force)
+            order = self._send_order(t, ticker=ticker, side=side, action="buy", count=count,
+                                     limit_price=limit)
+            if order is None:
+                return
             filled = filled_count(order)
             if filled < 1:
                 return self.skip(t, "order did not fill", ticker=ticker,
                                  order_status=order.get("status"))
-            cost = fill_cost_usd(order, filled, limit)
-        else:
-            filled, cost = count, round(count * ask, 2)  # paper: assume fill at the ask
+            cost = round(fill_cost_usd(order, filled, limit) + fees_usd(order), 2)
+        else:  # paper: assume a full fill at the ask, plus an estimated fee
+            filled = count
+            cost = round(count * ask + estimate_fee(count, ask, s.paper_fee_rate), 2)
 
         self.store.open_position(self.mode, ticker, side, filled, cost, t.wallet,
                                  t.condition_id, t.outcome_index)
@@ -238,6 +290,8 @@ class CopyEngine:
                 and p["source_wallet"] == t.wallet]
         if not mine:
             return
+        if self.halted:
+            return self.skip(t, "halted (exit not mirrored)")
         for p in mine:
             q = self.kalshi.get_quote(p["kalshi_ticker"])
             bid = q.bid(p["side"])
@@ -247,17 +301,19 @@ class CopyEngine:
                           bid=bid, floor=floor)
                 continue
             if self.s.is_live:
-                order = self.kalshi.create_order(
-                    ticker=p["kalshi_ticker"], side=p["side"], action="sell", count=p["count"],
-                    limit_price=floor, client_order_id=f"wc-{uuid.uuid4()}",
-                    time_in_force=self.s.time_in_force)
+                order = self._send_order(t, ticker=p["kalshi_ticker"], side=p["side"],
+                                         action="sell", count=p["count"], limit_price=floor)
+                if order is None:
+                    continue
                 sold = filled_count(order)
                 if sold < 1:
                     self.skip(t, "exit order did not fill", ticker=p["kalshi_ticker"])
                     continue
-                value = fill_cost_usd(order, sold, floor)
+                # IOC sell at `floor` fills at the bid or better; book the floor (conservative)
+                value = round(sold * floor - fees_usd(order), 2)
             else:
-                sold, value = p["count"], round(p["count"] * bid, 2)
+                sold = p["count"]
+                value = round(sold * bid - estimate_fee(sold, bid, self.s.paper_fee_rate), 2)
             if sold >= p["count"]:
                 self.store.close_position(p["id"], value)
             else:
@@ -275,19 +331,23 @@ class CopyEngine:
             except KalshiError as e:
                 log.warning("settle lookup failed for %s: %s", p["kalshi_ticker"], e)
                 continue
+            if m.get("status") not in SETTLED_STATUSES:
+                continue
             result = (m.get("result") or "").lower()
-            if m.get("status") in SETTLED_STATUSES and result in ("yes", "no"):
-                value = float(p["count"]) if result == p["side"] else 0.0
-                self.store.close_position(p["id"], value, status="settled")
-                self.store.log_event("settled", p["source_wallet"], p["condition_id"],
-                                     ticker=p["kalshi_ticker"], side=p["side"], result=result,
-                                     pnl=round(value - p["cost_usd"], 2), mode=self.mode)
+            if result in ("yes", "no"):
+                value, status = (float(p["count"]) if result == p["side"] else 0.0), "settled"
+            else:  # voided/cancelled market: Kalshi refunds at cost
+                value, status = float(p["cost_usd"]), "voided"
+            self.store.close_position(p["id"], value, status=status)
+            self.store.log_event("settled", p["source_wallet"], p["condition_id"],
+                                 ticker=p["kalshi_ticker"], side=p["side"], result=result or "void",
+                                 pnl=round(value - p["cost_usd"], 2), mode=self.mode)
 
     # -- reporting ---------------------------------------------------------------------------
     def report(self, days: int = 7) -> str:
         since = int(self.clock()) - days * 86400
         pos = self.store.all_positions(self.mode)
-        closed = [p for p in pos if p["status"] in ("closed", "settled")]
+        closed = [p for p in pos if p["status"] in ("closed", "settled", "voided")]
         open_ = [p for p in pos if p["status"] == "open"]
         realized = sum(p["pnl_usd"] or 0 for p in closed)
         wins = sum(1 for p in closed if (p["pnl_usd"] or 0) > 0)
@@ -303,10 +363,12 @@ class CopyEngine:
             f"whalecopy report ({self.mode} mode)",
             f"  open positions:   {len(open_)}  (${sum(p['cost_usd'] for p in open_):,.2f} at cost)",
             f"  closed/settled:   {len(closed)}  wins {wins}/{len(closed) or 0}",
-            f"  realized P&L:     ${realized:,.2f}",
+            f"  realized P&L:     ${realized:,.2f}  (after fees)",
             f"  last {days}d copies: {copied}",
             f"  pending reviews:  {len(self.store.mappings('pending'))}",
         ]
+        if self.halted:
+            lines.insert(1, f"  HALTED: {self.halted}  (run `whalecopy resume` after checking)")
         if skipped:
             lines.append(f"  last {days}d skips by reason:")
             for r, n in sorted(skipped.items(), key=lambda x: -x[1]):

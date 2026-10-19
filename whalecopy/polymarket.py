@@ -41,8 +41,7 @@ class WhaleTrade:
 
 
 def activity_key(row: dict) -> str:
-    return "|".join(str(row.get(k, "")) for k in
-                    ("transactionHash", "asset", "side", "size", "price", "timestamp"))
+    return "|".join(str(row.get(k, "")) for k in ("transactionHash", "asset", "side"))
 
 
 def aggregate_trades(wallet: str, rows: list[dict]) -> list[WhaleTrade]:
@@ -100,8 +99,8 @@ class PolymarketClient:
         })
 
     def activity(self, wallet: str, start: int | None = None, limit: int = 500,
-                 ascending: bool = True) -> list[dict]:
-        params = {"user": wallet, "type": "TRADE", "limit": limit,
+                 ascending: bool = True, offset: int = 0) -> list[dict]:
+        params = {"user": wallet, "type": "TRADE", "limit": limit, "offset": offset,
                   "sortDirection": "ASC" if ascending else "DESC"}
         if start:
             params["start"] = start
@@ -114,7 +113,7 @@ class PolymarketClient:
         except requests.RequestException as e:
             log.warning("gamma lookup failed for %s: %s", condition_id, e)
             return None
-        if not data:
+        if not isinstance(data, list) or not data or not isinstance(data[0], dict):
             return None
         m = data[0]
         outcomes = m.get("outcomes")

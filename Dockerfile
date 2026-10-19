@@ -10,7 +10,8 @@ RUN pip install .
 # Copies config.example.yaml and, if you created one, config.yaml (env vars override both).
 COPY config* ./
 
-RUN useradd --create-home bot && mkdir -p /data && chown bot /data
-USER bot
+# Runs as root on purpose: Fly mounts the /data volume root-owned, and the container
+# holds nothing but this bot.
+RUN mkdir -p /data
 
 CMD ["whalecopy", "run"]

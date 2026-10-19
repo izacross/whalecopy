@@ -44,6 +44,7 @@ class Settings:
     min_trade_usd: float = 25.0
     max_trade_usd: float = 50.0
     max_slippage: float = 0.03           # pay at most whale price + 3 cents
+    paper_fee_rate: float = 0.07         # paper-mode fee estimate: rate * contracts * p * (1-p)
     time_in_force: str = "immediate_or_cancel"
 
     # --- risk limits --------------------------------------------------------
@@ -104,39 +105,68 @@ class Settings:
                 )
             if not self.kalshi_api_key_id or self.private_key_bytes() is None:
                 raise ValueError("Live mode needs KALSHI_API_KEY_ID and a private key.")
+        for name in ("min_whale_trade_usd", "big_whale_trade_usd", "daily_max_usd",
+                     "max_open_usd", "per_market_max_usd", "max_slippage", "paper_fee_rate",
+                     "max_trades_per_day", "poll_seconds"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} can't be negative")
+        if self.per_market_max_usd < self.min_trade_usd:
+            raise ValueError("per_market_max_usd must be at least min_trade_usd")
+        if self.big_whale_trade_usd < self.min_whale_trade_usd:
+            raise ValueError("big_whale_trade_usd must be >= min_whale_trade_usd")
+        if self.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            raise ValueError("log_level must be DEBUG, INFO, WARNING or ERROR")
         for w in self.wallets:
             if not (w.startswith("0x") and len(w) == 42):
                 raise ValueError(f"Not a Polymarket wallet address: {w!r}")
 
 
-def _coerce(value: str, current):
-    if isinstance(current, bool):
-        return value.strip().lower() in ("1", "true", "yes", "on")
-    if isinstance(current, int):
-        return int(value)
-    if isinstance(current, float):
+_TRUE, _FALSE = {"1", "true", "yes", "on"}, {"0", "false", "no", "off", ""}
+
+
+def _coerce(name: str, value, type_name: str):
+    """Coerce by the field's declared type, not by whatever type the YAML happened to use."""
+    if type_name == "bool":
+        if isinstance(value, bool):
+            return value
+        v = str(value).strip().lower()
+        if v in _TRUE:
+            return True
+        if v in _FALSE:
+            return False
+        raise ValueError(f"{name.upper()} must be true or false, got {value!r}")
+    if type_name == "int":
+        return int(float(value))
+    if type_name == "float":
         return float(value)
-    if isinstance(current, list):
-        return [v.strip() for v in value.split(",") if v.strip()]
-    return value
+    if type_name.startswith("list"):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [v.strip() for v in value.split(",") if v.strip()]
+        return list(value)
+    return "" if value is None else str(value)
 
 
 def load_settings(config_path: str | None = None) -> Settings:
     s = Settings()
     path = Path(config_path or os.environ.get("WHALECOPY_CONFIG", "config.yaml"))
+    types = {f.name: str(f.type) for f in fields(Settings)}
     if path.exists():
         data = yaml.safe_load(path.read_text()) or {}
-        names = {f.name for f in fields(Settings)}
-        unknown = set(data) - names
+        unknown = set(data) - set(types)
         if unknown:
             raise ValueError(f"Unknown keys in {path}: {sorted(unknown)}")
+        for secret in ("live_confirm", "kalshi_private_key_pem"):
+            if data.get(secret):
+                raise ValueError(f"Set {secret.upper()} as an environment variable, "
+                                 f"not in {path.name}")
         for k, v in data.items():
-            setattr(s, k, v)
-    for f in fields(Settings):
-        env = os.environ.get(f.name.upper())
+            setattr(s, k, _coerce(k, v, types[k]))
+    for name, type_name in types.items():
+        env = os.environ.get(name.upper())
         if env is not None and env != "":
-            current = [] if f.name == "wallets" else getattr(s, f.name)
-            setattr(s, f.name, _coerce(env, current))
+            setattr(s, name, _coerce(name, env, type_name))
     s.wallets = [w.strip().lower() for w in (s.wallets or [])]
     s.validate()
     return s

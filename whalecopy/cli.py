@@ -139,6 +139,15 @@ def cmd_map(args):
         print("saved")
 
 
+def cmd_resume(args):
+    s, store, _, engine = build(args)
+    if not engine.halted:
+        print("Not halted.")
+        return
+    print(f"Clearing halt: {engine.halted}")
+    store.set(f"halted:{s.mode}", None)
+
+
 def cmd_report(args):
     _, _, _, engine = build(args)
     print(engine.report(days=args.days))
@@ -176,6 +185,8 @@ def main(argv=None):
     m.add_argument("side", nargs="?")
     m.add_argument("--status", default=None)
     m.set_defaults(fn=cmd_map)
+    sub.add_parser("resume", help="clear a safety halt after checking Kalshi").set_defaults(
+        fn=cmd_resume)
     r = sub.add_parser("report", help="P&L and activity summary")
     r.add_argument("--days", type=int, default=7)
     r.set_defaults(fn=cmd_report)

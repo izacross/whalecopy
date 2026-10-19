@@ -19,16 +19,22 @@ with two separate switches.
    - *Games* (moneylines): matched by slug, e.g. `nba-lal-bos-2026-10-19` →
      `KXNBAGAME-26OCT19LALBOS-BOS`. Used in paper mode automatically. In live mode only
      after you check them and set `sports_auto_approve: true`.
-   - *Everything else*: fuzzy text match with guards (dates must agree, numbers like
-     "50 bps" or "$120k" must agree, no near-tie). Only scores ≥ 92 trade automatically;
+   - *Everything else*: fuzzy text match with guards: dates must agree, numbers like
+     "50 bps" or "$120k" must agree, direction and negation words (above/below, not)
+     must agree, and the best match can't be a near-tie. Only scores ≥ 92 trade automatically;
      the rest wait for `whalecopy review`. Wrong matches are the main way this bot can
      lose money on a "right" call, so it errs toward skipping.
 3. **Price check.** Kalshi's ask must be no more than the whale's price + 3¢.
 4. **Risk check.** Daily cap ($250), open cap ($1,000), per-market cap ($100), 15 trades a
-   day, one copy per wallet+market per hour, never both YES and NO on one ticker.
+   day, one copy per wallet+market per hour, and never two conflicting positions in one
+   Kalshi event (e.g. both teams of a game).
 5. **Size.** $25 for a $500 whale buy, scaling to $50 for $5,000+.
 6. **Order.** Live mode sends an immediate-or-cancel limit order at whale price + 3¢,
-   so it can't fill worse than that. Paper mode assumes a fill at the ask.
+   so it can't fill worse than that. Each order's id is derived from the whale's fill, so
+   one signal can never become two orders. If Kalshi doesn't answer clearly (timeout,
+   server error), the bot **halts** all trading and alerts you; check your Kalshi
+   positions, then run `whalecopy resume`. Paper mode assumes a fill at the ask and
+   subtracts an estimated fee (`paper_fee_rate`).
 
 Polymarket's international site lists many markets Kalshi doesn't (geopolitics, many
 crypto and non-US events). Those signals are skipped. `whalecopy report` shows how many.
@@ -39,7 +45,7 @@ crypto and non-US events). Those signals are skipped. `whalecopy report` shows h
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 cp config.example.yaml config.yaml
-pytest                        # 30 offline tests
+pytest                        # 40 offline tests
 
 whalecopy discover            # ranks Polymarket wallets; saves data/candidates.csv
 ```
@@ -62,6 +68,7 @@ Other commands:
 | `whalecopy map add <conditionId> <outcomeIndex> <TICKER> yes\|no` | Add a match by hand |
 | `whalecopy test-match "Will the Fed cut 50 bps in October 2026?" Yes --end 2026-10-28` | Preview a match |
 | `whalecopy check` | Show settings, test your Kalshi key |
+| `whalecopy resume` | Clear a safety halt after checking your Kalshi account |
 
 ## 2. Deploy to the cloud (Fly.io)
 
@@ -76,6 +83,7 @@ fly volumes create whalecopy_data --size 1 --region iad
 fly secrets set WALLETS="0xabc...,0xdef..."          # or bake them into config.yaml
 fly secrets set NOTIFY_WEBHOOK_URL="https://hooks.slack.com/..."   # optional alerts
 fly deploy
+fly scale count 1                                   # exactly one machine, always
 fly logs                                            # watch it work
 ```
 
@@ -117,7 +125,8 @@ To go back to paper: `fly secrets set MODE=paper`.
   live, thin Kalshi books may fill partly or not at all.
 - **Exits** close your whole copy when the whale sells ≥ $250 of that outcome. It doesn't
   track partial trims.
-- **Fees** aren't in the paper P&L. Kalshi charges taker fees on many markets.
+- **Fees** in paper mode are an estimate (`paper_fee_rate`, default 0.07 × contracts ×
+  price × (1 − price)). Live mode records the fees Kalshi reports.
 - The Polymarket and Kalshi APIs change. If a request starts failing, check
   docs.polymarket.com and docs.kalshi.com first.
 - The sports matcher assumes Polymarket's outcome order follows the team order in the

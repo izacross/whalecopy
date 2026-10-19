@@ -5,8 +5,11 @@ from conftest import CID_FED, CID_GAME, NOW, WALLET, FakeKalshi, FakePoly, trade
 
 from whalecopy.config import Settings, load_settings
 from whalecopy.engine import CopyEngine, size_for
+from whalecopy.kalshi import KalshiError, estimate_fee
 
 LAL = "KXNBAGAME-26OCT19LALBOS-LAL"
+N = 82   # floor($50 / (0.58 limit + fee room + 1c))
+PAPER_COST = round(N * 0.56 + estimate_fee(N, 0.56, 0.07), 2)
 
 
 @pytest.fixture
@@ -43,8 +46,9 @@ def test_paper_copy(env):
     assert len(pos) == 1
     p = pos[0]
     assert p["kalshi_ticker"] == LAL and p["side"] == "yes"
-    assert p["count"] == 86            # floor($50 / 0.58 limit)
-    assert p["cost_usd"] == round(86 * 0.56, 2)
+    assert p["count"] == N
+    assert p["cost_usd"] == PAPER_COST
+    assert p["cost_usd"] <= 50
     assert kalshi.orders == []         # paper mode never sends orders
     # same fills seen again -> no double copy
     eng.tick()
@@ -129,7 +133,8 @@ def test_whale_sell_closes_copy_and_settlement(env):
     eng.tick()
     assert store.open_positions("paper") == []
     closed = store.all_positions("paper")[0]
-    assert closed["pnl_usd"] == pytest.approx(86 * 0.59 - 86 * 0.56, abs=0.01)
+    exit_value = N * 0.59 - estimate_fee(N, 0.59, 0.07)
+    assert closed["pnl_usd"] == pytest.approx(exit_value - PAPER_COST, abs=0.01)
 
 
 def test_settlement(env):
@@ -139,7 +144,7 @@ def test_settlement(env):
     kalshi.markets[LAL].update(status="settled", result="yes")
     eng.settle()
     p = store.all_positions("paper")[0]
-    assert p["status"] == "settled" and p["pnl_usd"] == pytest.approx(86 - 86 * 0.56, abs=0.01)
+    assert p["status"] == "settled" and p["pnl_usd"] == pytest.approx(N - PAPER_COST, abs=0.01)
 
 
 def test_live_mode_sends_order_and_records_fill(env):
@@ -150,9 +155,10 @@ def test_live_mode_sends_order_and_records_fill(env):
     eng.tick()
     o = kalshi.orders[0]
     assert o["ticker"] == LAL and o["side"] == "yes" and o["action"] == "buy"
-    assert o["limit_price"] == 0.58 and o["count"] == 86
+    assert o["limit_price"] == 0.58 and o["count"] == N
+    assert o["client_order_id"].startswith("wc-")
     p = store.open_positions("live")[0]
-    assert p["count"] == 43
+    assert p["count"] == N // 2
     assert store.open_positions("paper") == []
 
 
@@ -203,3 +209,86 @@ def test_wallets_from_env_with_empty_yaml_list(tmp_path, monkeypatch):
     other = "0x" + "B" * 40
     monkeypatch.setenv("WALLETS", f"{WALLET}, {other}")
     assert load_settings(str(cfg)).wallets == [WALLET, other.lower()]
+
+
+def test_unknown_order_outcome_halts_everything(env):
+    eng, poly, kalshi, store = env
+    eng.s.mode = "live"
+    kalshi.order_error = KalshiError("POST /portfolio/orders failed: read timed out")
+    poly.rows = [trade_row(usdc=5000)]
+    eng.tick()
+    assert eng.halted and store.open_positions("live") == []
+    kalshi.order_error = None
+    poly.rows.append(trade_row(usdc=5000, tx="0x9", ts=NOW - 5))
+    eng.s.cooldown_minutes = 0
+    eng.tick()
+    assert len(kalshi.orders) == 1          # nothing else is sent while halted
+
+
+def test_rejected_order_does_not_halt(env):
+    eng, poly, kalshi, _ = env
+    eng.s.mode = "live"
+    kalshi.order_error = KalshiError("POST /portfolio/orders -> 400: insufficient balance")
+    poly.rows = [trade_row(usdc=5000)]
+    eng.tick()
+    assert not eng.halted
+
+
+def test_one_bad_trade_does_not_drop_the_rest(env, monkeypatch):
+    eng, poly, _, store = env
+    cid2 = "0x" + "4" * 64
+    store.save_mapping(cid2, 0, LAL, "yes", 100, "approved", "manual", "")
+    poly.info = None   # market_info would crash if called; first trade has an unknown mapping
+    bad = trade_row(cid="0x" + "5" * 64, tx="0xbad", ts=NOW - 40)
+    good = trade_row(cid=cid2, tx="0xgood", ts=NOW - 30)
+    poly.rows = [bad, good]
+    eng.tick()
+    assert len(store.open_positions("paper")) == 1
+    assert any(e["kind"] == "error" for e in store.events_since(0))
+
+
+def test_no_conflicting_positions_in_same_event(env):
+    eng, poly, kalshi, store = env
+    cid2 = "0x" + "6" * 64
+    store.save_mapping(cid2, 1, "KXNBAGAME-26OCT19LALBOS-BOS", "yes", 100, "approved", "", "")
+    kalshi.set_price("KXNBAGAME-26OCT19LALBOS-BOS", yes_ask=0.45)
+    poly.rows = [trade_row(tx="0x1", ts=NOW - 40),
+                 trade_row(cid=cid2, idx=1, outcome="Celtics", price=0.44, tx="0x2", ts=NOW - 30)]
+    eng.tick()
+    held = store.open_positions("paper")
+    assert len(held) == 1 and held[0]["kalshi_ticker"] == LAL
+
+
+def test_late_whale_sell_still_exits(env):
+    eng, poly, kalshi, store = env
+    poly.rows = [trade_row(usdc=5000, ts=NOW - 60)]
+    eng.tick()
+    poly.rows.append(trade_row(side="SELL", price=0.60, usdc=4000, tx="0xs", ts=NOW - 5000))
+    kalshi.set_price(LAL, yes_bid=0.59)
+    eng.store.set(f"cursor:{WALLET}", NOW - 86400)   # e.g. after downtime
+    eng.tick()
+    assert store.open_positions("paper") == []
+
+
+def test_voided_market_refunds(env):
+    eng, poly, kalshi, store = env
+    poly.rows = [trade_row(usdc=5000)]
+    eng.tick()
+    kalshi.markets[LAL].update(status="finalized", result="")
+    eng.settle()
+    p = store.all_positions("paper")[0]
+    assert p["status"] == "voided" and p["pnl_usd"] == 0
+
+
+def test_config_rejects_bool_typos_and_yaml_secrets(tmp_path, monkeypatch):
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("min_trade_usd: 25\n")
+    monkeypatch.setenv("MIN_TRADE_USD", "27.5")
+    assert load_settings(str(cfg)).min_trade_usd == 27.5
+    monkeypatch.setenv("PAUSED", "ture")
+    with pytest.raises(ValueError, match="PAUSED"):
+        load_settings(str(cfg))
+    monkeypatch.delenv("PAUSED")
+    cfg.write_text("live_confirm: yes-real-money\n")
+    with pytest.raises(ValueError, match="environment variable"):
+        load_settings(str(cfg))

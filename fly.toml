@@ -1,4 +1,5 @@
 # Fly.io config for a single always-on worker (no web traffic).
+# Run exactly ONE machine (`fly scale count 1`): two would each trade with their own database.
 # Change `app` to a unique name before `fly launch --copy-config --no-deploy`.
 app = "whalecopy-bot"
 primary_region = "iad"   # near Kalshi/Polymarket infrastructure on the US east coast

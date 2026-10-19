@@ -25,10 +25,13 @@ whalecopy once | report | review | check | map list | test-match "<q>" <outcome>
   (path includes `/trade-api/v2`, no query). Prices use `*_dollars` string fields.
 - `whalecopy/matcher.py`: Polymarket outcome -> (Kalshi ticker, side). Sports moneylines
   via slug (`nba-lal-bos-2026-10-19` -> `KX...GAME-26OCT19LALBOS-BOS`); everything else via
-  fuzzy text with date/number/ambiguity guards. Unsure matches go to a review queue.
+  fuzzy text with date, number, direction/negation and ambiguity guards. Unsure matches
+  go to a review queue.
 - `whalecopy/engine.py`: the loop. `handle_buy` order of checks: age, paused, whale size,
   price range, cooldown, mapping, daily count, opposite side, budget caps, Kalshi quote,
-  slippage, then order. `handle_sell` exits copies when the source whale sells.
+  slippage, then order. Live orders use a deterministic `client_order_id`; an unclear
+  order result halts the bot until `whalecopy resume`. `handle_sell` exits copies when
+  the source whale sells (even late).
   `settle` books P&L when Kalshi markets resolve.
 - `whalecopy/store.py`: SQLite (cursors, seen fills, Kalshi index, mappings, positions,
   event log). Paper and live positions are kept apart by `mode`.
@@ -55,6 +58,8 @@ whalecopy once | report | review | check | map list | test-match "<q>" <outcome>
   the activity title with no end date (so nothing auto-approves except sports).
 - Sports matcher assumes Polymarket outcome order = team order in the slug. Verify with
   `whalecopy map list --status sports` before setting `sports_auto_approve`.
-- Paper fills ignore order-book depth and Kalshi fees.
+- Paper fills ignore order-book depth; fees are estimated with `paper_fee_rate`.
+- No reconciliation against Kalshi `/portfolio/positions` yet; positions changed by hand
+  on Kalshi aren't seen by the bot.
 - Possible v2: compare Kalshi price with sharp sportsbook lines (odds API) and skip copies
   already priced above fair value.

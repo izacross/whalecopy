@@ -39,9 +39,13 @@ class FakePoly:
     def __init__(self):
         self.rows: list[dict] = []
         self.info: dict[str, dict] = {}
+        self.fail = None
 
-    def activity(self, wallet, start=None, limit=500, ascending=True):
-        return [r for r in self.rows if start is None or r["timestamp"] >= start]
+    def activity(self, wallet, start=None, limit=500, ascending=True, offset=0):
+        if self.fail:
+            raise self.fail
+        rows = [r for r in self.rows if start is None or r["timestamp"] >= start]
+        return rows[offset:offset + limit]
 
     def market_info(self, cid):
         return self.info.get(cid)
@@ -55,6 +59,7 @@ class FakeKalshi:
         self.markets = {m["ticker"]: dict(m) for m in kalshi_markets()}
         self.orders: list[dict] = []
         self.fill_ratio = 1.0
+        self.order_error = None
 
     def set_price(self, ticker, yes_ask=None, no_ask=None, yes_bid=None, no_bid=None):
         m = self.markets[ticker]
@@ -74,6 +79,8 @@ class FakeKalshi:
 
     def create_order(self, **kw):
         self.orders.append(kw)
+        if self.order_error:
+            raise self.order_error
         filled = int(kw["count"] * self.fill_ratio)
         return {"order_id": "o1", "status": "executed" if filled else "canceled",
                 "fill_count": filled, "remaining_count": kw["count"] - filled,
