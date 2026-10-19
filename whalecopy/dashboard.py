@@ -12,6 +12,7 @@ import hmac
 import html
 import json
 import logging
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -445,13 +446,26 @@ def make_handler(s: Settings, quote: Callable[[str], Quote | None] | None):
     return Handler
 
 
+class DualStackServer(ThreadingHTTPServer):
+    """Listen on IPv6 and IPv4 (Fly's private network and `fly proxy` use IPv6)."""
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
+
 def start(s: Settings, quote: Callable[[str], Quote | None] | None = None,
           background: bool = True) -> ThreadingHTTPServer:
     if not s.dashboard_password:
         raise ValueError("Set DASHBOARD_PASSWORD to turn on the dashboard")
     if not s.db_path.exists():  # read-only open needs the file; create it the normal way
         Store(s.db_path).db.close()
-    server = ThreadingHTTPServer(("0.0.0.0", s.dashboard_port), make_handler(s, quote))
+    handler = make_handler(s, quote)
+    try:
+        server = DualStackServer(("::", s.dashboard_port), handler)
+    except OSError:  # no IPv6 on this machine
+        server = ThreadingHTTPServer(("0.0.0.0", s.dashboard_port), handler)
     server.daemon_threads = True
     log.info("dashboard listening on port %d", s.dashboard_port)
     if background:
