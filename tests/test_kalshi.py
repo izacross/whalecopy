@@ -67,6 +67,29 @@ def test_public_calls_are_unsigned():
     assert "KALSHI-ACCESS-KEY" not in sess.calls[0]["headers"]
 
 
+def test_open_markets_exclude_combos_and_follow_cursor():
+    class Paged(RecordingSession):
+        def request(self, method, url, params=None, **kw):
+            self.calls.append(dict(params=dict(params)))
+            page = {"markets": [{"ticker": f"M{len(self.calls)}"}],
+                    "cursor": "next" if len(self.calls) == 1 else ""}
+
+            class R:
+                status_code = 200
+                content = b"x"
+                text = ""
+
+                def json(_):
+                    return page
+            return R()
+
+    sess = Paged(None)
+    c = KalshiClient("https://api.elections.kalshi.com/trade-api/v2", session=sess)
+    assert [m["ticker"] for m in c.iter_open_markets()] == ["M1", "M2"]
+    assert all(call["params"]["mve_filter"] == "exclude" for call in sess.calls)
+    assert sess.calls[1]["params"]["cursor"] == "next"
+
+
 def test_helpers():
     assert price_str(0.5) == "0.5000"
     assert quote_from_market({"ticker": "T", "yes_ask": 55, "status": "active"}).yes_ask == 0.55
