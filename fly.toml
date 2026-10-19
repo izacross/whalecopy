@@ -1,7 +1,8 @@
-# Fly.io config for a single always-on worker (no web traffic).
+# Fly.io config for a single always-on worker. It also serves the read-only dashboard
+# on port 8080 when the DASHBOARD_PASSWORD secret is set.
 # Run exactly ONE machine (`fly scale count 1`): two would each trade with their own database.
 # Change `app` to a unique name before `fly launch --copy-config --no-deploy`.
-app = "whalecopy-bot"
+app = "whalecopy-izac"
 primary_region = "iad"   # near Kalshi/Polymarket infrastructure on the US east coast
 
 [build]
@@ -10,6 +11,14 @@ primary_region = "iad"   # near Kalshi/Polymarket infrastructure on the US east 
   MODE = "paper"
   KALSHI_ENV = "prod"
   DATA_DIR = "/data"
+
+# The dashboard. The machine must never be stopped for being idle: it's the trading loop.
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
 
 [mounts]
   source = "whalecopy_data"

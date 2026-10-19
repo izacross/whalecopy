@@ -35,6 +35,9 @@ whalecopy once | report | review | check | map list | test-match "<q>" <outcome>
   `settle` books P&L when Kalshi markets resolve.
 - `whalecopy/store.py`: SQLite (cursors, seen fills, Kalshi index, mappings, positions,
   event log). Paper and live positions are kept apart by `mode`.
+- `whalecopy/dashboard.py`: read-only web page (stdlib HTTP server, Basic auth) started by
+  `whalecopy run` when DASHBOARD_PASSWORD is set; port 8080, exposed by `[http_service]` in
+  fly.toml. Opens SQLite with `mode=ro`; never trades.
 - `whalecopy/discover.py`: leaderboard + per-wallet stats to pick wallets worth following.
 - Deploy: `Dockerfile`, `fly.toml` (Fly worker + /data volume), or `Dockerfile.cloudflare` +
   `cloudflare/` (Cloudflare Containers; Litestream keeps SQLite in R2). See README.md.

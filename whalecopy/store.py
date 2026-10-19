@@ -36,9 +36,14 @@ def day_start(now: float | None = None) -> int:
 
 
 class Store:
-    def __init__(self, path: str | Path, clock=time.time):
+    def __init__(self, path: str | Path, clock=time.time, readonly: bool = False):
         self.clock = clock
         path = Path(path)
+        if readonly:  # the dashboard: can't write, even by mistake
+            self.db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True,
+                                      timeout=10, check_same_thread=False)
+            self.db.row_factory = sqlite3.Row
+            return
         if str(path) != ":memory:":
             path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(path))
@@ -184,6 +189,18 @@ class Store:
         self.db.execute("INSERT INTO events (ts,kind,wallet,condition_id,detail) VALUES (?,?,?,?,?)",
                         (int(self.clock()), kind, wallet, condition_id, json.dumps(detail)))
         self.db.commit()
+
+    def copy_titles(self, mode: str) -> dict[tuple[str, str], str]:
+        """(condition_id, ticker) -> "whale market title / outcome", from copy events."""
+        out = {}
+        for r in self.db.execute(
+                "SELECT condition_id, json_extract(detail,'$.ticker') t, "
+                "json_extract(detail,'$.title') title, json_extract(detail,'$.outcome') o "
+                "FROM events WHERE kind='copied' AND json_extract(detail,'$.mode')=? ORDER BY ts",
+                (mode,)):
+            if r["title"]:
+                out[(r["condition_id"], r["t"])] = f"{r['title']} / {r['o'] or ''}".rstrip(" /")
+        return out
 
     def events_since(self, since: int) -> list[dict]:
         return [dict(r) | {"detail": json.loads(r["detail"] or "{}")} for r in self.db.execute(
