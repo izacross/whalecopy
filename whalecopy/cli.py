@@ -8,6 +8,7 @@ import signal
 import sys
 import time
 
+from . import dashboard
 from .config import load_settings
 from .discover import discover
 from .engine import CopyEngine
@@ -38,6 +39,11 @@ def cmd_run(args):
               f"/trade, ${s.daily_max_usd:.0f}/day cap")
     if s.is_live:
         banner += f"; Kalshi balance ${kalshi.get_balance():,.2f}"
+    if s.dashboard_password:
+        try:
+            dashboard.start(s, dashboard.QuoteCache(kalshi.get_quote))
+        except OSError as e:  # the dashboard is optional; never block trading on it
+            log.error("dashboard failed to start: %s", e)
     engine.notify.send(banner)
 
     stop = {"flag": False}
@@ -148,6 +154,14 @@ def cmd_resume(args):
     store.set(f"halted:{s.mode}", None)
 
 
+def cmd_dashboard(args):
+    s, _, kalshi, _ = build(args)
+    if not s.dashboard_password:
+        sys.exit("Set DASHBOARD_PASSWORD (8+ characters) first.")
+    print(f"Dashboard on http://localhost:{s.dashboard_port} (any username, your password)")
+    dashboard.start(s, dashboard.QuoteCache(kalshi.get_quote), background=False)
+
+
 def cmd_report(args):
     _, _, _, engine = build(args)
     print(engine.report(days=args.days))
@@ -190,6 +204,8 @@ def main(argv=None):
     r = sub.add_parser("report", help="P&L and activity summary")
     r.add_argument("--days", type=int, default=7)
     r.set_defaults(fn=cmd_report)
+    sub.add_parser("dashboard", help="serve only the web dashboard (no trading)").set_defaults(
+        fn=cmd_dashboard)
     t = sub.add_parser("test-match", help="see how a Polymarket question would map")
     t.add_argument("question")
     t.add_argument("outcome")

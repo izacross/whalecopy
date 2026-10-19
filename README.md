@@ -91,6 +91,18 @@ Run commands on the server with `fly ssh console -C "whalecopy report"` (or `rev
 Pause instantly with `fly secrets set PAUSED=true`. Any setting can change the same way,
 e.g. `fly secrets set MAX_TRADE_USD=40`.
 
+**Dashboard:** set a password and the bot also serves a read-only web page with copied
+trades, open positions, wins/losses, P&L and a per-trader breakdown:
+
+```bash
+fly secrets set DASHBOARD_PASSWORD="pick-a-long-password"
+```
+
+Then open `https://<your-app>.fly.dev` and sign in with any username and that password.
+Show names instead of addresses with `fly secrets set WALLET_NAMES="0xabc...=lava-lava,0xdef...=aenews2"`
+(names from `data/candidates.csv` are used automatically). Locally: `DASHBOARD_PASSWORD=... whalecopy dashboard`.
+Open positions are valued at the current Kalshi bid, so "Open P&L" is roughly what selling now would bring.
+
 **Railway / Render alternative:** create a service from this folder (it uses the
 Dockerfile), add a volume mounted at `/data`, and set the same env vars in the dashboard.
 Run it as a background worker, not a web service.
