@@ -1,0 +1,17 @@
+{
+  "name": "whalecopy-cloudflare",
+  "private": true,
+  "description": "Runs the whalecopy Docker image on Cloudflare Containers",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "check": "wrangler types && tsc --noEmit && wrangler deploy --dry-run",
+    "types": "wrangler types"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "wrangler": "^4.151.2"
+  }
+}

@@ -5,3 +5,5 @@ data/
 tests/
 __pycache__/
 .pytest_cache/
+cloudflare/node_modules/
+cloudflare/.wrangler/

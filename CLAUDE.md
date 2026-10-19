@@ -36,7 +36,8 @@ whalecopy once | report | review | check | map list | test-match "<q>" <outcome>
 - `whalecopy/store.py`: SQLite (cursors, seen fills, Kalshi index, mappings, positions,
   event log). Paper and live positions are kept apart by `mode`.
 - `whalecopy/discover.py`: leaderboard + per-wallet stats to pick wallets worth following.
-- Deploy: `Dockerfile`, `fly.toml` (worker + /data volume). See README.md.
+- Deploy: `Dockerfile`, `fly.toml` (Fly worker + /data volume), or `Dockerfile.cloudflare` +
+  `cloudflare/` (Cloudflare Containers; Litestream keeps SQLite in R2). See README.md.
 
 ## Rules for working on this repo
 
