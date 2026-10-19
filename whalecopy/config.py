@@ -67,6 +67,11 @@ class Settings:
     notify_webhook_url: str = ""         # Slack or Discord incoming webhook (optional)
     log_level: str = "INFO"
 
+    # --- web dashboard (read-only; off unless a password is set) ------------------
+    dashboard_password: str = ""         # set as a secret: DASHBOARD_PASSWORD
+    dashboard_port: int = 8080
+    wallet_names: list[str] = field(default_factory=list)  # "0xabc...=lava-lava" labels
+
     # ------------------------------------------------------------------------
     @property
     def kalshi_base_url(self) -> str:
@@ -116,6 +121,8 @@ class Settings:
             raise ValueError("big_whale_trade_usd must be >= min_whale_trade_usd")
         if self.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
             raise ValueError("log_level must be DEBUG, INFO, WARNING or ERROR")
+        if self.dashboard_password and len(self.dashboard_password) < 8:
+            raise ValueError("DASHBOARD_PASSWORD must be at least 8 characters")
         for w in self.wallets:
             if not (w.startswith("0x") and len(w) == 42):
                 raise ValueError(f"Not a Polymarket wallet address: {w!r}")
@@ -157,7 +164,7 @@ def load_settings(config_path: str | None = None) -> Settings:
         unknown = set(data) - set(types)
         if unknown:
             raise ValueError(f"Unknown keys in {path}: {sorted(unknown)}")
-        for secret in ("live_confirm", "kalshi_private_key_pem"):
+        for secret in ("live_confirm", "kalshi_private_key_pem", "dashboard_password"):
             if data.get(secret):
                 raise ValueError(f"Set {secret.upper()} as an environment variable, "
                                  f"not in {path.name}")
