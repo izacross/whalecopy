@@ -38,6 +38,7 @@ class Settings:
     min_price: float = 0.05              # skip longshots
     max_price: float = 0.92              # skip near-certainties (little upside after fees)
     max_signal_age_sec: int = 600        # ignore whale trades older than this
+    buildup_window_sec: int = 900        # add up a whale's small buys of one outcome over this window
     mirror_sells: bool = True            # when a followed whale sells, close our copy
 
     # --- sizing (USD per copied trade) -------------------------------------
@@ -112,7 +113,7 @@ class Settings:
                 raise ValueError("Live mode needs KALSHI_API_KEY_ID and a private key.")
         for name in ("min_whale_trade_usd", "big_whale_trade_usd", "daily_max_usd",
                      "max_open_usd", "per_market_max_usd", "max_slippage", "paper_fee_rate",
-                     "max_trades_per_day", "poll_seconds"):
+                     "max_trades_per_day", "poll_seconds", "buildup_window_sec"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} can't be negative")
         if self.per_market_max_usd < self.min_trade_usd:

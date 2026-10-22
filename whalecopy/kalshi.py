@@ -143,7 +143,9 @@ class KalshiClient:
     def iter_open_markets(self, page_size: int = 1000, max_pages: int = 400):
         cursor = None
         for _ in range(max_pages):
-            params = {"status": "open", "limit": page_size}
+            # Without mve_filter the open list is ~400k multi-leg combos, which used up max_pages
+            # before the ~127k plain markets; matcher.index_row_from_market still drops any stragglers.
+            params = {"status": "open", "limit": page_size, "mve_filter": "exclude"}
             if cursor:
                 params["cursor"] = cursor
             data = self._request("GET", "/markets", params=params)

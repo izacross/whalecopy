@@ -62,6 +62,40 @@ def test_fills_split_across_rows_are_aggregated(env):
     assert len(eng.store.open_positions("paper")) == 1   # 600 total clears the 500 minimum
 
 
+def test_small_buys_across_polls_build_up_to_one_copy(env):
+    eng, poly, _, store = env
+    for i, ts in enumerate((NOW - 400, NOW - 200, NOW - 30)):
+        poly.rows.append(trade_row(usdc=200, ts=ts, tx=f"0xb{i}"))
+        eng.tick()
+        assert len(store.open_positions("paper")) == (1 if i == 2 else 0)
+    copied = [e for e in store.events_since(0) if e["kind"] == "copied"]
+    assert len(copied) == 1 and copied[0]["detail"]["whale_usdc"] == 600
+    skipped = [e["detail"] for e in store.events_since(0) if e["kind"] == "skipped"]
+    assert [d["built_up"] for d in skipped] == [200, 400]
+    assert store.get(f"buildup:{WALLET}:{CID_GAME}:0") is None   # total starts over
+
+
+def test_small_buys_outside_window_do_not_combine(env):
+    eng, poly, _, store = env
+    eng.s.buildup_window_sec = 100
+    poly.rows = [trade_row(usdc=300, ts=NOW - 400, tx="0xb1")]
+    eng.tick()
+    poly.rows.append(trade_row(usdc=300, ts=NOW - 30, tx="0xb2"))
+    eng.tick()
+    assert store.open_positions("paper") == []
+
+
+def test_whale_sell_resets_build_up(env):
+    eng, poly, _, store = env
+    poly.rows = [trade_row(usdc=300, ts=NOW - 400, tx="0xb1")]
+    eng.tick()
+    poly.rows.append(trade_row(usdc=50, ts=NOW - 300, side="SELL", tx="0xs1"))
+    eng.tick()
+    poly.rows.append(trade_row(usdc=300, ts=NOW - 30, tx="0xb2"))
+    eng.tick()
+    assert store.open_positions("paper") == []
+
+
 def test_skips_when_price_moved(env):
     eng, poly, kalshi, store = env
     kalshi.set_price(LAL, yes_ask=0.70)
