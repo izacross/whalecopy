@@ -1,5 +1,6 @@
 import base64
 import json
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -121,6 +122,9 @@ def test_server_requires_password_and_is_read_only(tmp_path):
             url + "/", headers={"Authorization": auth})).read().decode()
         assert "By trader" in page
         assert urllib.request.urlopen(url + "/healthz").read() == b"ok"
+        port = server.server_address[1]
+        if server.address_family == socket.AF_INET6:  # skipped where IPv6 is unavailable
+            assert urllib.request.urlopen(f"http://[::1]:{port}/healthz").read() == b"ok"
     finally:
         server.shutdown()
         server.server_close()
