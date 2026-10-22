@@ -60,6 +60,10 @@ class Store:
         self.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, json.dumps(value)))
         self.db.commit()
 
+    def delete(self, key: str) -> None:
+        self.db.execute("DELETE FROM kv WHERE key=?", (key,))
+        self.db.commit()
+
     # -- seen fills -------------------------------------------------------------
     def is_seen(self, key: str) -> bool:
         return self.db.execute("SELECT 1 FROM seen WHERE key=?", (key,)).fetchone() is not None

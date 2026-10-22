@@ -5,6 +5,7 @@ import hashlib
 import logging
 import math
 import time
+from dataclasses import replace
 
 from .config import Settings
 from .kalshi import (KalshiClient, KalshiError, estimate_fee, fees_usd, fill_cost_usd,
@@ -194,6 +195,26 @@ class CopyEngine:
         if t.side == "SELL" and self.s.mirror_sells:
             return self.handle_sell(t)  # exits are mirrored even if late
 
+    def build_up(self, t: WhaleTrade) -> WhaleTrade:
+        """Whales often build a position in small buys spread over several polls.
+
+        Keep a running total per wallet+outcome; once the buys inside the window add up
+        to the minimum, return them as one combined trade (and start the total over).
+        """
+        key = f"buildup:{t.wallet}:{t.condition_id}:{t.outcome_index}"
+        b = self.store.get(key)
+        if not b or t.timestamp - b["first_ts"] > self.s.buildup_window_sec:
+            b = {"first_ts": t.timestamp, "usdc": 0.0, "shares": 0.0, "keys": []}
+        b["usdc"] += t.usdc
+        b["shares"] += t.shares
+        b["keys"] += list(t.keys)
+        if b["usdc"] < self.s.min_whale_trade_usd:
+            self.store.set(key, b)
+            return replace(t, usdc=b["usdc"])
+        self.store.delete(key)
+        return replace(t, usdc=b["usdc"], shares=b["shares"], price=b["usdc"] / b["shares"],
+                       keys=tuple(b["keys"]))
+
     def _send_order(self, t: WhaleTrade, **kw) -> dict | None:
         """Live order with a deterministic id. If the outcome is unknown, halt everything."""
         try:
@@ -214,7 +235,10 @@ class CopyEngine:
         if self.halted:
             return self.skip(t, "halted")
         if t.usdc < s.min_whale_trade_usd:
-            return self.skip(t, "whale trade too small")
+            combined = self.build_up(t)
+            if combined.usdc < s.min_whale_trade_usd:
+                return self.skip(t, "whale trade too small", built_up=round(combined.usdc, 2))
+            t = combined
         if not (s.min_price <= t.price <= s.max_price):
             return self.skip(t, "price outside range")
         last = self.store.last_copy_ts(t.wallet, t.condition_id, self.mode)
@@ -283,6 +307,7 @@ class CopyEngine:
             f"for ${cost:.2f} (whale paid {t.price:.2f}, ${t.usdc:,.0f}) - {t.title} / {t.outcome}")
 
     def handle_sell(self, t: WhaleTrade) -> None:
+        self.store.delete(f"buildup:{t.wallet}:{t.condition_id}:{t.outcome_index}")
         if t.usdc < self.s.min_whale_trade_usd * 0.5:
             return  # small trims don't trigger an exit
         mine = [p for p in self.store.open_positions(self.mode)
