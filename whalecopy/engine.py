@@ -136,7 +136,8 @@ class CopyEngine:
         if status == "pending":
             self.notify.send(
                 f"Review needed: '{res.poly_text}' -> {res.ticker} ({res.side.upper()}), "
-                f"score {res.score:.0f}: {res.reason}. Run `whalecopy review`.")
+                f"score {res.score:.0f}: {res.reason}. Approve or reject it on the dashboard "
+                "(or run `whalecopy review`).")
             return None, None, "match awaiting your review"
         return res.ticker, res.side, ""
 

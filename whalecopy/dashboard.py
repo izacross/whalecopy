@@ -1,8 +1,9 @@
-"""Read-only web dashboard: copied trades, open positions, wins/losses, P&L per trader.
+"""Web dashboard: copied trades, open positions, wins/losses, P&L per trader.
 
 Started by `whalecopy run` when DASHBOARD_PASSWORD is set (or on its own with
-`whalecopy dashboard`). Plain stdlib HTTP server with Basic auth; it opens the database
-read-only and never places orders or shows keys.
+`whalecopy dashboard`). Plain stdlib HTTP server with Basic auth. Pages read the database
+read-only; the one write is approving or rejecting a pending market match (the same as
+`whalecopy review`). It never places orders or shows keys.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
+from urllib.parse import parse_qs
 
 from .config import Settings
 from .kalshi import Quote
@@ -27,6 +29,7 @@ log = logging.getLogger(__name__)
 
 CLOSED_STATUSES = ("closed", "settled", "voided")
 EVENT_KINDS = ("copied", "exited", "settled", "skipped", "halted", "error")
+REVIEW_ACTIONS = ("approve", "flip", "reject")
 
 
 # -- data -----------------------------------------------------------------------------
@@ -136,8 +139,36 @@ def summarize(store: Store, mode: str, wallets: list[str], names: dict[str, str]
         "skips": sorted(skips.items(), key=lambda x: -x[1]),
         "events": [e for e in reversed(events) if e["kind"] in EVENT_KINDS][:60],
         "pending_reviews": len(store.mappings("pending")),
+        "reviews": [dict(m, candidates=json.loads(m["candidates"] or "[]"))
+                    for m in store.mappings("pending")],
         "names": names,
     }
+
+
+def apply_review(store: Store, condition_id: str, outcome_index: int, action: str,
+                 ticker: str | None = None) -> str:
+    """Approve, flip or reject one pending match. Returns what was done, for the page."""
+    m = store.get_mapping(condition_id, outcome_index)
+    if not m or m["status"] != "pending":
+        raise ValueError("that match is no longer waiting for review")
+    if action not in REVIEW_ACTIONS:
+        raise ValueError("unknown action")
+    if action == "reject":
+        store.set_mapping_status(condition_id, outcome_index, "rejected")
+        return "Rejected. The bot won't copy trades on this market."
+    if ticker and ticker not in {c["ticker"] for c in json.loads(m["candidates"] or "[]")}:
+        raise ValueError("that Kalshi market wasn't one of the suggested matches")
+    side = m["kalshi_side"]
+    if action == "flip":
+        side = "no" if side == "yes" else "yes"
+    store.set_mapping_status(condition_id, outcome_index, "approved", ticker=ticker or None,
+                             side=side)
+    return f"Approved: buy {side.upper()} on {ticker or m['kalshi_ticker']}."
+
+
+def review_token(password: str) -> str:
+    """Hidden form field, so another website can't submit approvals through your browser."""
+    return hmac.new(password.encode(), b"whalecopy-review", "sha256").hexdigest()
 
 
 # -- html -----------------------------------------------------------------------------
@@ -219,9 +250,11 @@ def render(d: dict) -> str:
         banners.append(f'<div class="banner bad">The bot is HALTED: {esc(d["halted"])}. '
                        'It will not copy anything until someone checks Kalshi and runs '
                        '<code>whalecopy resume</code>.</div>')
+    if d.get("flash"):
+        banners.append(f'<div class="banner info">{esc(d["flash"])}</div>')
     if d["pending_reviews"]:
         banners.append(f'<div class="banner warn">{d["pending_reviews"]} market matches are '
-                       'waiting for review (<code>whalecopy review</code>).</div>')
+                       'waiting for your OK. See <a href="#review">Matches to review</a>.</div>')
     if t["unmarked"]:
         banners.append(f'<div class="banner warn">{t["unmarked"]} open positions have no Kalshi '
                        "price right now, so they're left out of today's value.</div>")
@@ -276,6 +309,34 @@ def render(d: dict) -> str:
         f'<td>{who(e["wallet"]) if e["wallet"] else ""}</td><td>{describe(e)}</td></tr>'
         for e in d["events"]) or '<tr><td colspan="3" class="muted">No activity yet.</td></tr>'
 
+    token = esc(d.get("token", ""))
+
+    def review_form(m) -> str:
+        side = esc((m["kalshi_side"] or "").upper())
+        other = "NO" if side == "YES" else "YES"
+        opts = "".join(
+            f'<label class="cand"><input type="radio" name="ticker" value="{esc(c["ticker"])}"'
+            f'{" checked" if c["ticker"] == m["kalshi_ticker"] else ""}> '
+            f'<span class="mono">{esc(c["ticker"])}</span> {esc(c["text"])} '
+            f'<span class="muted">(score {c["score"]:.0f}'
+            f'{"; " + esc("; ".join(c["notes"])) if c.get("notes") else ""})</span></label>'
+            for c in m["candidates"][:5])
+        return (
+            f'<form method="post" action="/review" class="review">'
+            f'<input type="hidden" name="token" value="{token}">'
+            f'<input type="hidden" name="condition_id" value="{esc(m["condition_id"])}">'
+            f'<input type="hidden" name="outcome_index" value="{m["outcome_index"]}">'
+            f'<div class="q">{esc(m["poly_text"])}</div>'
+            f'<div class="muted">Bot\'s pick: buy <b>{side}</b> on '
+            f'<span class="mono">{esc(m["kalshi_ticker"])}</span>: {esc(m["kalshi_text"])}</div>'
+            f'{opts}<div class="buttons">'
+            f'<button name="action" value="approve" class="ok">Approve (buy {side})</button>'
+            f'<button name="action" value="flip">Approve but buy {other}</button>'
+            f'<button name="action" value="reject" class="no">Reject</button></div></form>')
+
+    review_html = "".join(review_form(m) for m in d.get("reviews", [])) or \
+        '<p class="muted" style="padding:0 14px">Nothing waiting for review.</p>'
+
     skip_rows = "".join(f'<tr><td>{esc(r)}</td><td class="num">{n}</td></tr>'
                         for r, n in d["skips"]) or \
         '<tr><td colspan="2" class="muted">No skipped trades.</td></tr>'
@@ -284,7 +345,7 @@ def render(d: dict) -> str:
         mode=esc(d["mode"].upper()), updated=d["now"], banners="".join(banners),
         cards=card_html, chart=chart(d["curve"]), trader_rows=trader_rows,
         open_rows=open_rows, closed_rows=closed_rows, event_rows=event_rows,
-        skip_rows=skip_rows, days=d["days"])
+        skip_rows=skip_rows, days=d["days"], review_html=review_html)
 
 
 PAGE = """<!doctype html>
@@ -323,12 +384,26 @@ tr.ev-skipped td {{ color:var(--muted); }} tr.ev-halted td, tr.ev-error td {{ co
 .chart .line {{ fill:none; stroke-width:2.5; }} .chart .line.pos {{ stroke:var(--pos); }} .chart .line.neg {{ stroke:var(--neg); }}
 details summary {{ cursor:pointer; margin:28px 0 10px; font-weight:600; }}
 code {{ font-size:13px; }}
+form.review {{ padding:12px 14px; border-bottom:1px solid var(--line); }}
+form.review:last-child {{ border-bottom:0; }}
+form.review .q {{ font-weight:600; margin-bottom:4px; }}
+label.cand {{ display:block; margin:6px 0; font-size:14px; }}
+.buttons {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }}
+button {{ font:inherit; padding:8px 14px; border-radius:8px; border:1px solid var(--line);
+  background:var(--panel); color:var(--text); cursor:pointer; }}
+button.ok {{ background:var(--pos); border-color:var(--pos); color:#fff; }}
+button.no {{ color:var(--neg); }}
 </style></head>
 <body><main>
 <h1>whalecopy · {mode} mode</h1>
 <div class="muted">Updated <span class="ts-inline" data-ts="{updated}"></span>. Refreshes every minute.</div>
 {banners}
 <div class="cards">{cards}</div>
+
+<h2 id="review">Matches to review</h2>
+<div class="muted" style="margin-bottom:8px">The bot found a Kalshi market it thinks matches,
+but wasn't sure enough to use it alone. Approve it and the bot copies the next trade there.</div>
+<div class="panel">{review_html}</div>
 
 <h2>Profit so far, trade by trade</h2>
 <div class="panel">{chart}</div>
@@ -407,6 +482,10 @@ def check_auth(header: str | None, password: str) -> bool:
     return hmac.compare_digest(given.encode(), password.encode())
 
 
+FLASH = {"ok": "Saved. The bot uses your answer from its next trade on.",
+         "stale": "That match was already handled, so nothing changed."}
+
+
 def make_handler(s: Settings, quote: Callable[[str], Quote | None] | None):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # keep request noise out of the bot's logs
@@ -441,7 +520,38 @@ def make_handler(s: Settings, quote: Callable[[str], Quote | None] | None):
                 store.db.close()
             if path == "/api/summary":
                 return self._send(200, json.dumps(d, default=str), "application/json")
+            d["token"] = review_token(s.dashboard_password)
+            d["flash"] = FLASH.get(self.path.split("?", 1)[1] if "?" in self.path else "")
             return self._send(200, render(d), "text/html; charset=utf-8")
+
+        def do_POST(self):
+            if not check_auth(self.headers.get("Authorization"), s.dashboard_password):
+                return self._send(401, "Password required", "text/plain",
+                                  {"WWW-Authenticate": 'Basic realm="whalecopy", charset="UTF-8"'})
+            if self.path.split("?", 1)[0] != "/review":
+                return self._send(404, "Not found", "text/plain")
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > 10_000:
+                return self._send(413, "Too large", "text/plain")
+            form = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode()).items()}
+            if not hmac.compare_digest(form.get("token", ""), review_token(s.dashboard_password)):
+                return self._send(403, "Reload the dashboard and try again.", "text/plain")
+            store = Store(s.db_path)
+            try:
+                msg = apply_review(store, form.get("condition_id", ""),
+                                   int(form.get("outcome_index") or -1),
+                                   form.get("action", ""), form.get("ticker"))
+                log.info("dashboard review: %s", msg)
+                result = "ok"
+            except (ValueError, KeyError) as e:
+                log.info("dashboard review refused: %s", e)
+                result = "stale"
+            finally:
+                store.db.close()
+            self.send_response(303)
+            self.send_header("Location", f"/?{result}#review")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
     return Handler
 
