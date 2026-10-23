@@ -145,3 +145,67 @@ def test_short_dashboard_password_rejected():
     import pytest
     with pytest.raises(ValueError):
         Settings(dashboard_password="short").validate()
+
+
+CANDS = [{"ticker": "KXBRPRES-26-LULA", "text": "Will Lula win?", "score": 75, "notes": []},
+         {"ticker": "KXBRPRES-26-OTHER", "text": "Someone else?", "score": 60, "notes": []}]
+
+
+def pending(store, cid="c9", idx=0):
+    store.save_mapping(cid, idx, "KXBRPRES-26-LULA", "yes", 75, "pending",
+                       "Will Lula win? / Yes", "Will Lula win?", CANDS)
+
+
+def test_apply_review_approve_flip_reject_and_stale(store):
+    pending(store, "a")
+    pending(store, "b")
+    pending(store, "c")
+    pending(store, "d")
+    dashboard.apply_review(store, "a", 0, "approve")
+    assert store.get_mapping("a", 0)["status"] == "approved"
+    assert store.get_mapping("a", 0)["kalshi_side"] == "yes"
+    dashboard.apply_review(store, "b", 0, "flip")
+    assert store.get_mapping("b", 0)["kalshi_side"] == "no"
+    dashboard.apply_review(store, "c", 0, "reject")
+    assert store.get_mapping("c", 0)["status"] == "rejected"
+    dashboard.apply_review(store, "d", 0, "approve", ticker="KXBRPRES-26-OTHER")
+    assert store.get_mapping("d", 0)["kalshi_ticker"] == "KXBRPRES-26-OTHER"
+    import pytest
+    with pytest.raises(ValueError):          # already decided: no second answer
+        dashboard.apply_review(store, "a", 0, "reject")
+    pending(store, "e")
+    with pytest.raises(ValueError):          # only a suggested market can be picked
+        dashboard.apply_review(store, "e", 0, "approve", ticker="KXSOMETHING-ELSE")
+    assert store.get_mapping("e", 0)["status"] == "pending"
+
+
+def test_review_form_over_http_needs_password_and_token(tmp_path):
+    s = Settings(data_dir=str(tmp_path), wallets=[WALLET], dashboard_password="s3cret-pass",
+                 dashboard_port=0)
+    pending(Store(s.db_path, clock=lambda: NOW))
+    server = dashboard.start(s)
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    auth = {"Authorization": "Basic " + base64.b64encode(b"izac:s3cret-pass").decode()}
+
+    def post(body, headers):
+        req = urllib.request.Request(url + "/review", data=body.encode(), headers=headers,
+                                     method="POST")
+        try:
+            return urllib.request.urlopen(req).status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    try:
+        page = urllib.request.urlopen(urllib.request.Request(url + "/", headers=auth)).read().decode()
+        assert "Matches to review" in page and "KXBRPRES-26-LULA" in page
+        token = dashboard.review_token("s3cret-pass")
+        assert token in page
+        form = "condition_id=c9&outcome_index=0&action=approve"
+        assert post(form + f"&token={token}", {}) == 401             # no password
+        assert post(form + "&token=wrong", auth) == 403               # forged form
+        assert Store(s.db_path).get_mapping("c9", 0)["status"] == "pending"
+        assert post(form + f"&token={token}", auth) == 200            # 303 -> page
+        assert Store(s.db_path).get_mapping("c9", 0)["status"] == "approved"
+    finally:
+        server.shutdown()
+        server.server_close()
