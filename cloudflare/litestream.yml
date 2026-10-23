@@ -1,0 +1,13 @@
+# Streams /data/whalecopy.db to R2 (S3-compatible) about once a second.
+# Values come from env vars the Worker passes in (see cloudflare/src/index.ts);
+# R2_ENDPOINT is filled in by entrypoint.sh from R2_ACCOUNT_ID.
+dbs:
+  - path: /data/whalecopy.db
+    replicas:
+      - type: s3
+        bucket: ${R2_BUCKET}
+        path: whalecopy.db
+        endpoint: ${R2_ENDPOINT}
+        region: auto
+        access-key-id: ${R2_ACCESS_KEY_ID}
+        secret-access-key: ${R2_SECRET_ACCESS_KEY}

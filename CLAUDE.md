@@ -41,7 +41,8 @@ whalecopy once | report | review | check | map list | test-match "<q>" <outcome>
   or reject a pending match, same as `whalecopy review`), guarded by an HMAC form token.
   Never trades.
 - `whalecopy/discover.py`: leaderboard + per-wallet stats to pick wallets worth following.
-- Deploy: `Dockerfile`, `fly.toml` (worker + /data volume). See README.md.
+- Deploy: `Dockerfile`, `fly.toml` (Fly worker + /data volume), or `Dockerfile.cloudflare` +
+  `cloudflare/` (Cloudflare Containers; Litestream keeps SQLite in R2). See README.md.
 
 ## Rules for working on this repo
 

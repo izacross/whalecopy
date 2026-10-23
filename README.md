@@ -107,6 +107,82 @@ Open positions are valued at the current Kalshi bid, so "Open P&L" is roughly wh
 Dockerfile), add a volume mounted at `/data`, and set the same env vars in the dashboard.
 Run it as a background worker, not a web service.
 
+## 2b. Deploy to Cloudflare (Containers)
+
+An alternative to Fly.io; both work from the same code. Cloudflare runs the bot's Docker
+image (`Dockerfile.cloudflare`) as a
+[Cloudflare Container](https://developers.cloudflare.com/containers/), and a small Worker
+in `cloudflare/` keeps exactly one copy of it running.
+
+The difference from Fly: Cloudflare container disks are wiped on every restart and there
+are no volumes. So the image includes [Litestream](https://litestream.io), which restores
+the SQLite database from an R2 bucket on boot and streams every write back to R2 about
+once a second. A hard crash can lose the last second or so of writes; a normal stop or
+redeploy loses nothing.
+
+Needs the Workers Paid plan ($5/month) and Docker running locally (Wrangler builds the
+image). The `basic` instance (1/4 vCPU, 1 GiB) running all month is roughly a few dollars on
+top of the plan; check [Containers pricing](https://developers.cloudflare.com/containers/pricing/).
+
+```bash
+cd cloudflare
+npm install
+npx wrangler login
+
+# 1. R2 bucket for the database backup
+npx wrangler r2 bucket create whalecopy-db
+#    Then in the dashboard: R2 > Manage API tokens > Create token with
+#    "Object Read & Write" on that bucket. Note the access key id, secret, and account id.
+
+# 2. Secrets (each command prompts for the value)
+npx wrangler secret put R2_BUCKET             # whalecopy-db
+npx wrangler secret put R2_ACCOUNT_ID
+npx wrangler secret put R2_ACCESS_KEY_ID
+npx wrangler secret put R2_SECRET_ACCESS_KEY
+npx wrangler secret put WALLETS               # 0xabc...,0xdef...  (or bake into config.yaml)
+npx wrangler secret put NOTIFY_WEBHOOK_URL    # optional alerts
+npx wrangler secret put ADMIN_TOKEN           # any long random string; guards the admin URLs
+
+# 3. Deploy (builds ../Dockerfile.cloudflare, including your config.yaml if you made one)
+npx wrangler deploy
+```
+
+A cron in the Worker starts the container within a minute of deploying, and restarts it
+within a minute if it ever stops. Watch it under Workers & Pages > whalecopy > Containers
+in the dashboard (logs are there too), or with `npx wrangler tail`.
+
+Control it with the Worker URL that `wrangler deploy` prints:
+
+```bash
+URL=https://whalecopy.<your-subdomain>.workers.dev
+curl -H "Authorization: Bearer $ADMIN_TOKEN" $URL/status
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" $URL/stop      # stays stopped
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" $URL/start
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" $URL/restart   # back within a minute
+```
+
+Every Worker var and secret is passed to the bot as an env var, so settings change the same
+way as on Fly, plus a restart: `npx wrangler secret put PAUSED` (enter `true`), then
+`POST /restart`. Default vars (`MODE=paper`, `KALSHI_ENV`, `DATA_DIR`) live in
+`cloudflare/wrangler.jsonc`.
+
+To read the bot's database on your machine (for `whalecopy report`), pull the latest copy
+from R2 with [Litestream](https://litestream.io/install/) and the same config the container
+uses:
+
+```bash
+export R2_BUCKET=whalecopy-db R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... \
+  R2_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+litestream restore -config cloudflare/litestream.yml -o data/whalecopy.db /data/whalecopy.db
+whalecopy report
+```
+
+That copy is read-only in practice: changes you make to it (`whalecopy review`) don't flow
+back to the running bot. Reviewing matches is easier on Fly, where `fly ssh console` works.
+
+**Run only one deployment.** Don't run the Fly and Cloudflare bots at the same time, and
+don't point two Workers at the same R2 path: each would trade on its own.
+
 ## 3. Going live (when you're ready)
 
 Do this only after a couple of weeks of paper results you're happy with.
@@ -123,6 +199,10 @@ fly secrets set KALSHI_API_KEY_ID="..." \
   KALSHI_PRIVATE_KEY_PEM="$(cat kalshi.key)" \
   MODE=live LIVE_CONFIRM=yes-real-money
 ```
+
+On Cloudflare: `wrangler secret put` each of `KALSHI_API_KEY_ID`, `KALSHI_PRIVATE_KEY_PEM`
+and `LIVE_CONFIRM`, change `MODE` to `live` in `cloudflare/wrangler.jsonc`, then
+`npx wrangler deploy`.
 
 The bot refuses to start live without `LIVE_CONFIRM=yes-real-money`. On startup it posts
 your Kalshi balance to the webhook. Paper and live positions are tracked separately.

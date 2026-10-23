@@ -1,0 +1,37 @@
+// Cloudflare Containers deploy for whalecopy. See README "Deploy to Cloudflare".
+// A small Worker keeps exactly one container running the bot (Dockerfile.cloudflare).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "whalecopy",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+
+  "containers": [
+    {
+      "class_name": "WhaleCopy",
+      "image": "../Dockerfile.cloudflare",
+      "image_build_context": "..",
+      // Exactly one: two instances would each trade with their own database.
+      "max_instances": 1,
+      // 1/4 vCPU, 1 GiB RAM. "lite" (256 MiB) is cheaper but tight for Python + the market index.
+      "instance_type": "basic"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "WHALECOPY", "class_name": "WhaleCopy" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WhaleCopy"] }],
+
+  // Every minute: start the bot if it isn't running (first deploy, crash, restart, rollout).
+  "triggers": { "crons": ["* * * * *"] },
+
+  // Passed to the bot as env vars. Secrets (R2 keys, Kalshi keys, wallets...) are set with
+  // `wrangler secret put` and are passed the same way.
+  "vars": {
+    "MODE": "paper",
+    "KALSHI_ENV": "prod",
+    "DATA_DIR": "/data"
+  },
+
+  "observability": { "enabled": true }
+}
